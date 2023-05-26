@@ -8,6 +8,7 @@ use dotenvy::var;
 use log::{error, info};
 use mostro_core::order::{NewOrder, Order, SmallOrder};
 use mostro_core::{Action, Content, Kind as OrderKind, Message, Status};
+use nostr_sdk::nips::nip04;
 use nostr_sdk::prelude::hex::ToHex;
 use nostr_sdk::prelude::*;
 use sqlx::SqlitePool;
@@ -49,6 +50,7 @@ pub async fn publish_order(
     initiator_pubkey: &str,
     master_pubkey: &str,
     ack_pubkey: XOnlyPublicKey,
+    parent_event: &Event
 ) -> Result<()> {
     let order = crate::db::add_order(pool, new_order, "", initiator_pubkey, master_pubkey).await?;
     let order_id = order.id;
@@ -99,7 +101,14 @@ pub async fn publish_order(
     );
     let ack_message = ack_message.as_json()?;
 
-    send_dm(client, keys, &ack_pubkey, ack_message).await?;
+    let parent_event_id = parent_event.id;
+    send_reply_dm(
+      client,
+      keys,
+      &ack_pubkey,
+      ack_message,
+      Some(parent_event_id)
+    ).await?;
 
     client
         .send_event(event)
@@ -120,6 +129,27 @@ pub async fn send_dm(
     info!("Sending event: {event:#?}");
     client.send_event(event).await?;
 
+    Ok(())
+}
+
+pub async fn send_reply_dm(
+  client: &Client,
+  sender_keys: &Keys,
+  receiver_pubkey: &XOnlyPublicKey,
+  content: String,
+  parent_event_id: Option<EventId>
+) -> Result<()> {
+    let mut tags = vec![Tag::PubKey(*receiver_pubkey, None)];
+    if let Some(event_id) = parent_event_id {
+      tags.push(Tag::Event(event_id, None, Some(Marker::Reply)));
+    }
+    let encrypted_content = nip04::encrypt::<String>(
+      &sender_keys.secret_key()?,
+      &receiver_pubkey,
+      content.into()
+    )?;
+    let event = EventBuilder::new(Kind::EncryptedDirectMessage, encrypted_content, &tags).to_event(sender_keys)?;
+    client.send_event(event).await?;
     Ok(())
 }
 
